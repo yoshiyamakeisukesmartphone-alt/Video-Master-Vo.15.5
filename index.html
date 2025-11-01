@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Video Master Vo.15.4</title>
+<link rel="manifest" href="manifest.json">
+<style>
+  :root{
+    --bg:#0f1724; --fg:#e6eef6; --panel:#0b1220; --accent:#06b6d4; --danger:#ff3b30;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+  .wrap{max-width:1200px;margin:12px auto;padding:10px;display:flex;flex-wrap:wrap;gap:12px;box-sizing:border-box}
+  h1{width:100%;text-align:center;margin:8px 0 6px 0}
+  .panel{background:var(--panel);padding:10px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.28);width:320px;box-sizing:border-box}
+  .panel.full{width:100%;max-width:760px}
+  input[type=text]{width:100%;padding:8px;border-radius:8px;border:none;background:rgba(255,255,255,0.03);color:var(--fg);box-sizing:border-box}
+  ul{list-style:none;margin:8px 0;padding:0;max-height:320px;overflow:auto}
+  li{display:flex;align-items:center;gap:8px;padding:8px;border-radius:8px;margin:6px 0;background:rgba(255,255,255,0.02);user-select:none}
+  .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab}
+  button{background:var(--accent);border:none;color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
+  .small{font-size:13px;padding:4px 8px}
+  .danger{background:var(--danger)}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:8px}
+  audio{width:100%;max-width:760px;border-radius:10px;background:#000;display:block;margin:8px auto}
+  .topbar{display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:8px;flex-wrap:wrap}
+  .hint{font-size:13px;color:rgba(255,255,255,0.6);margin-top:6px}
+  @media(max-width:900px){.panel{width:100%}.panel.full{order:3}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+</head>
+<body data-theme="dark">
+  <h1>🎧 Video Master Vo.15.4</h1>
+
+  <div class="topbar">
+    <button id="themeToggle" class="small">🌗 テーマ切替</button>
+  </div>
+
+  <div class="wrap">
+    <div class="panel">
+      <h3>プレイリスト</h3>
+      <input id="playlistSearch" type="text" placeholder="🔍 プレイリスト検索">
+      <ul id="playlistList"></ul>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button id="addPlaylist">＋ 新規</button>
+        <button id="exportBtn" class="small">エクスポート</button>
+      </div>
+      <div class="hint">プレイリストはIndexedDBに保存されます。</div>
+    </div>
+
+    <div class="panel">
+      <h3>ファイル</h3>
+      <input id="fileSearch" type="text" placeholder="🔍 曲を検索">
+      <ul id="fileList"></ul>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <label for="fileInput" style="background:rgba(255,255,255,0.03);padding:6px 10px;border-radius:8px;cursor:pointer">＋ ファイルを追加</label>
+        <input id="fileInput" type="file" accept="audio/*" multiple style="display:none">
+      </div>
+      <div class="hint">ドラッグで並べ替え可能です。</div>
+    </div>
+
+    <div class="panel full">
+      <audio id="player" controls playsinline webkit-playsinline></audio>
+      <div class="controls">
+        <button id="prevBtn">⏮ 前</button>
+        <button id="playBtn">▶ 再生</button>
+        <button id="pauseBtn">⏸ 停止</button>
+        <button id="nextBtn">⏭ 次</button>
+        <button id="loopBtn">🔁 ループ：オン</button>
+        <button id="fullscreenBtn">⛶ 全画面</button>
+      </div>
+      <div class="hint">ホーム画面に追加するとPWAとして動作します。</div>
+    </div>
+  </div>
+
+<script>
+let playlists = [];
+let currentPlaylist = null;
+let currentIndex = 0;
+let loopMode = true;
+let db = null;
+let audioCtx = null;
+let mediaSource = null;
+let keepAliveSource = null;
+let resumeOnReturn = false;
+
+const openReq = indexedDB.open('VideoMaster_v15_4', 1);
+openReq.onupgradeneeded = e => {
+  db = e.target.result;
+  if(!db.objectStoreNames.contains('playlists')) db.createObjectStore('playlists', {keyPath:'name'});
+};
+openReq.onsuccess = e => {
+  db = e.target.result;
+  loadPlaylists();
+  const saved = localStorage.getItem('vm-theme');
+  if(saved) document.documentElement.dataset.theme = saved;
+};
+openReq.onerror = e => console.error('IndexedDB error', e);
+
+function savePlaylists(){
+  if(!db) return;
+  const tx = db.transaction('playlists','readwrite');
+  const store = tx.objectStore('playlists');
+  store.clear();
+  for(const p of playlists) store.put(p);
+}
+function loadPlaylists(){
+  if(!db) return;
+  const tx = db.transaction('playlists','readonly');
+  const store = tx.objectStore('playlists');
+  const getAll = store.getAll();
+  getAll.onsuccess = () => {
+    playlists = getAll.result || [];
+    renderPlaylists();
+    if(playlists.length>0 && !currentPlaylist) selectPlaylist(playlists[0].name);
+  };
+}
+
+function renderPlaylists(){
+  const q = document.getElementById('playlistSearch').value.toLowerCase();
+  const ul = document.getElementById('playlistList');
+  ul.innerHTML = '';
+  playlists.filter(p => p.name.toLowerCase().includes(q)).forEach(p => {
+    const li = document.createElement('li');
+    const span = document.createElement('span'); span.className='name'; span.textContent = p.name; span.onclick = ()=>selectPlaylist(p.name);
+    const ren = document.createElement('button'); ren.textContent='✏️'; ren.className='small';
+    ren.onclick = e => { e.stopPropagation(); const nn = prompt('新しいプレイリスト名', p.name); if(nn){ p.name = nn; savePlaylists(); renderPlaylists(); } };
+    const del = document.createElement('button'); del.textContent='×'; del.className='danger';
+    del.onclick = e => { e.stopPropagation(); if(confirm(`「${p.name}」を削除しますか？`)){ playlists = playlists.filter(x=>x.name!==p.name); savePlaylists(); renderPlaylists(); if(currentPlaylist===p.name){ currentPlaylist=null; renderFiles(); } } };
+    li.append(span, ren, del);
+    ul.appendChild(li);
+  });
+}
+
+function renderFiles(){
+  const q = document.getElementById('fileSearch').value.toLowerCase();
+  const ul = document.getElementById('fileList');
+  ul.innerHTML = '';
+  let files = playlists.find(p=>p.name===currentPlaylist)?.files || [];
+  files.filter(f => f.name.toLowerCase().includes(q)).forEach((f,i) => {
+    const li = document.createElement('li');
+    const span = document.createElement('span'); span.className='name'; span.textContent = f.name; span.onclick = ()=>playFileIndex(i);
+    const ren = document.createElement('button'); ren.textContent='✏️'; ren.className='small';
+    ren.onclick = e => { e.stopPropagation(); const nn = prompt('新しい曲名', f.name); if(nn){ f.name = nn; const pl = playlists.find(p=>p.name===currentPlaylist); if(pl) pl.files = files; savePlaylists(); renderFiles(); } };
+    const del = document.createElement('button'); del.textContent='×'; del.className='danger';
+    del.onclick = e => { e.stopPropagation(); if(confirm(`${f.name} を削除しますか？`)){ files.splice(i,1); const pl = playlists.find(p=>p.name===currentPlaylist); if(pl) pl.files = files; savePlaylists(); renderFiles(); } };
+    li.append(span, ren, del);
+    ul.appendChild(li);
+  });
+
+  if(window.fileSortable) window.fileSortable.destroy();
+  window.fileSortable = Sortable.create(ul, {
+    animation: 150,
+    handle: '.name',
+    onEnd: function(evt){
+      const oldIndex = evt.oldIndex, newIndex = evt.newIndex;
+      if(oldIndex===newIndex) return;
+      const arr = playlists.find(p=>p.name===currentPlaylist)?.files || [];
+      const [moved] = arr.splice(oldIndex,1);
+      arr.splice(newIndex,0,moved);
+      const pl = playlists.find(p=>p.name===currentPlaylist); if(pl) pl.files = arr; savePlaylists();
+      renderFiles();
+    }
+  });
+}
+
+function fileToBase64(file){
+  return new Promise((res,rej)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>res(reader.result);
+    reader.onerror = rej;
+    reader.readAsDataURL(file);
+  });
+}
+
+function selectPlaylist(name){
+  currentPlaylist = name;
+  renderFiles();
+}
+
+document.getElementById('addPlaylist').onclick = ()=>{
+  const name = prompt('プレイリスト名');
+  if(!name) return;
+  playlists.push({name, files: []});
+  savePlaylists();
+  renderPlaylists();
+};
+
+document.getElementById('playlistSearch').oninput = renderPlaylists;
+document.getElementById('fileSearch').oninput = renderFiles;
+
+document.getElementById('fileInput').onchange = async (e) => {
+  const files = [...e.target.files];
+  if(!currentPlaylist){ alert('プレイリストを選択してください'); e.target.value=''; return; }
+  const pl = playlists.find(p=>p.name===currentPlaylist);
+  for(const f of files){ const data = await fileToBase64(f); pl.files.push({name:f.name, data}); }
+  savePlaylists(); renderFiles();
+  e.target.value = '';
+};
+
+const player = document.getElementById('player');
+
+function getQueue(){ return playlists.find(p=>p.name===currentPlaylist)?.files || [] }
+
+function playFileIndex(i){
+  const q = getQueue();
+  if(!q || !q[i]) return;
+  const item = q[i];
+  player.src = item.data;
+  player.play().catch(()=>{});
+  currentIndex = i;
+  ensureAudioContextConnected();
+  startKeepAlive();
+}
+
+document.getElementById('playBtn').onclick = ()=>{ player.play().catch(()=>{}); ensureAudioContextConnected(); startKeepAlive(); };
+document.getElementById('pauseBtn').onclick = ()=> { player.pause(); stopKeepAlive(); };
+document.getElementById('prevBtn').onclick = ()=> { const q = getQueue(); if(!q || q.length===0) return; currentIndex = (currentIndex - 1 + q.length) % q.length; playFileIndex(currentIndex); };
+document.getElementById('nextBtn').onclick = ()=> nextTrack();
+document.getElementById('loopBtn').onclick = ()=> { loopMode = !loopMode; player.loop = false; document.getElementById('loopBtn').textContent = `🔁 ループ：${loopMode ? 'オン' : 'オフ'}`; };
+document.getElementById('fullscreenBtn').onclick = ()=> { if(player.requestFullscreen) player.requestFullscreen(); else if(player.webkitEnterFullscreen) player.webkitEnterFullscreen(); };
+
+function nextTrack(){
+  const q = getQueue();
+  if(!q || q.length===0) return;
+  if(currentIndex < q.length - 1){ currentIndex++; playFileIndex(currentIndex); }
+  else if(loopMode){ currentIndex = 0; playFileIndex(currentIndex); }
+}
+
+player.addEventListener('ended', ()=>{ nextTrack(); });
+
+function ensureAudioContextConnected(){
+  try{
+    if(!audioCtx){ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    if(audioCtx.state === 'suspended'){ audioCtx.resume().catch(()=>{}); }
+    if(!mediaSource){
+      try{ mediaSource = audioCtx.createMediaElementSource(player); mediaSource.connect(audioCtx.destination); }
+      catch(e){}
+    }
+  }catch(e){ console.warn('AudioContext error', e); }
+}
+
+function startKeepAlive(){
+  try{
+    if(!audioCtx) ensureAudioContextConnected();
+    if(!audioCtx || keepAliveSource) return;
+    const sampleRate = audioCtx.sampleRate || 44100;
+    const buffer = audioCtx.createBuffer(1, sampleRate, sampleRate);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    src.connect(audioCtx.destination);
+    src.start(0);
+    keepAliveSource = src;
+  }catch(e){ console.warn('keepAlive error', e); }
+}
+function stopKeepAlive(){
+  try{ if(keepAliveSource){ keepAliveSource.stop(); keepAliveSource.disconnect(); keepAliveSource=null; } }catch(e){}
+}
+
+document.addEventListener('visibilitychange', ()=>{
+  if(document.hidden){ if(!player.paused) resumeOnReturn = true; } else { if(resumeOnReturn){ player.play().catch(()=>{}); resumeOnReturn=false; } }
+});
+
+document.getElementById('exportBtn').onclick = ()=> {
+  const data = JSON.stringify(playlists);
+  const blob = new Blob([data], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'playlists.json'; a.click(); URL.revokeObjectURL(url);
+};
+
+document.getElementById('themeToggle').onclick = ()=>{
+  const html = document.documentElement;
+  html.dataset.theme = html.dataset.theme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('vm-theme', html.dataset.theme);
+};
+
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('service-worker.js').then(r => {
+    console.log('SW registered', r);
+  }).catch(err => console.warn('SW failed', err));
+}
+
+setTimeout(()=>{ renderPlaylists(); renderFiles(); }, 200);
+</script>
+</body>
+</html>
